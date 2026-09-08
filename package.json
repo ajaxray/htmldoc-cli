@@ -23,5 +23,14 @@
     "share",
     "publish",
     "htmldoc"
-  ]
+  ],
+  "homepage": "https://htmldoc.space",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ajaxray/htmldoc-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ajaxray/htmldoc-cli/issues"
+  },
+  "author": "Anis Ahmad"
 }

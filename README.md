@@ -3,9 +3,12 @@
 Share a local HTML or Markdown file as an unlisted link on [htmldoc.space](https://htmldoc.space). Links live 30 days and can be updated in place. Zero dependencies; needs Node 22 or newer.
 
 ```sh
-npx htmldoc-cli login          # once: paste the key from https://htmldoc.space/dashboard
-npx htmldoc-cli report.html    # prints https://p.htmldoc.space/<id>
+npm i -g htmldoc-cli
+htmldoc login          # once: paste the key from https://htmldoc.space/dashboard
+htmldoc report.html    # prints https://p.htmldoc.space/<id>
 ```
+
+Without a global install, `npx -y htmldoc-cli <file>` works the same way.
 
 ## Commands
 
@@ -60,12 +63,18 @@ Environment variables:
 ## Development
 
 ```sh
-cd cli
+git clone git@github.com:ajaxray/htmldoc-cli.git
+cd htmldoc-cli
 node --test
 npm pack --dry-run
 ```
 
-Tests mock `fetch` and use a temporary `XDG_CONFIG_HOME`; nothing touches your real config.
+Tests mock `fetch` and use a temporary `XDG_CONFIG_HOME`; nothing touches your real config. To run an unpublished checkout as `htmldoc`, `npm link` in the clone.
+
+## Related
+
+- Service and API: [ajaxray/htmldoc](https://github.com/ajaxray/htmldoc), live at [htmldoc.space](https://htmldoc.space).
+- Agent skill that drives this CLI: [ajaxray/htmldoc-skill](https://github.com/ajaxray/htmldoc-skill), install with `npx skills add ajaxray/htmldoc-skill`.
 
 ## License
 
