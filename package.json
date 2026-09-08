@@ -1,6 +1,6 @@
 {
   "name": "htmldoc-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Share a local HTML or Markdown file as an unlisted htmldoc.space link that lives 30 days and can be updated in place.",
   "license": "MIT",
   "type": "module",
