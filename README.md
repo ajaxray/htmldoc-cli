@@ -74,7 +74,7 @@ Tests mock `fetch` and use a temporary `XDG_CONFIG_HOME`; nothing touches your r
 ## Related
 
 - Service and API: [ajaxray/htmldoc](https://github.com/ajaxray/htmldoc), live at [htmldoc.space](https://htmldoc.space).
-- Agent skill that drives this CLI: [ajaxray/htmldoc-skill](https://github.com/ajaxray/htmldoc-skill), install with `npx skills add ajaxray/htmldoc-skill`.
+- Agent skill that drives this CLI from Claude, Codex, Pi, or [any AI agent that supports skills](https://www.skills.sh/agent): [ajaxray/htmldoc-skill](https://github.com/ajaxray/htmldoc-skill), install with `npx skills add ajaxray/htmldoc-skill`.
 
 ## License
 
