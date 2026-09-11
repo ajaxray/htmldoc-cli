@@ -1,14 +1,41 @@
 # htmldoc-cli
 
-Share a local HTML or Markdown file as an unlisted link on [htmldoc.space](https://htmldoc.space). Links live 30 days and can be updated in place. Zero dependencies; needs Node 22 or newer.
+Share an HTML or Markdown file from your laptop as a link. One command. No deploy, no repo, no drag-and-drop.
+
+![npx htmldoc-cli report.html prints a share link](https://raw.githubusercontent.com/ajaxray/htmldoc-cli/main/docs/cli.gif)
 
 ```sh
-npm i -g htmldoc-cli
-htmldoc login          # once: paste the key from https://htmldoc.space/dashboard
-htmldoc report.html    # prints https://p.htmldoc.space/<id>
+npx -y htmldoc-cli report.html
+# https://p.htmldoc.space/NO8JWj8cd57m
 ```
 
-Without a global install, `npx -y htmldoc-cli <file>` works the same way.
+The link is unlisted, lives 30 days, and can be updated in place so the URL never changes. Hosted at [htmldoc.space](https://htmldoc.space): free, run by one person, no ads or analytics on your pages.
+
+## Setup, once
+
+1. Sign in at [htmldoc.space](https://htmldoc.space) with GitHub and copy your API key.
+2. Run `npx -y htmldoc-cli login` and paste it.
+
+Prefer a global install? `npm i -g htmldoc-cli` gives you `htmldoc` on PATH. Zero dependencies; needs Node 22 or newer.
+
+## From an AI agent
+
+Install the skill, then say "share this report" in Claude Code, Codex, Pi, or [any agent that supports skills](https://www.skills.sh/agent):
+
+```sh
+npx skills add ajaxray/htmldoc-skill
+```
+
+![Claude Code answering "share the report.html" with a link](https://raw.githubusercontent.com/ajaxray/htmldoc-cli/main/docs/agent.gif)
+
+The agent runs this CLI. It never sees or handles your key.
+
+## What you get
+
+- One file per link. HTML is served byte for byte; Markdown is rendered.
+- Caps: 2 MB HTML, 512 KB Markdown, 100 live pages per account.
+- 30-day expiry, reset by every `--update`. Re-sharing the same file keeps the same link.
+- A small badge with a Report link on every page. That is the only thing added to your HTML.
 
 ## Commands
 
