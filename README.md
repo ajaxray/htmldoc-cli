@@ -26,7 +26,7 @@ Install the skill, then say "share this report" in Claude Code, Codex, Pi, or [a
 npx skills add ajaxray/htmldoc-skill
 ```
 
-Then ask your agent: **"share this report"**. It replies with the link and the expiry date.
+Then ask your agent in plain words: **"share this report"**, **"publish process.html with htmldoc"**, or **"make this plan shareable"**. It replies with the link and the expiry date.
 
 ![Claude Code answering "share the report.html" with a link](https://raw.githubusercontent.com/ajaxray/htmldoc-cli/main/docs/agent.gif)
 
