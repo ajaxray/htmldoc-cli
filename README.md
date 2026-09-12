@@ -32,6 +32,8 @@ Then ask your agent in plain words: **"share this report"**, **"publish process.
 
 The agent runs this CLI. It never sees or handles your key.
 
+Agents write better HTML than Markdown, and the Claude Code team [says so with twenty examples](https://claude.com/blog/using-claude-code-the-unreasonable-effectiveness-of-html). Their one caveat is sharing the file. This is that step.
+
 ## What you get
 
 - One file per link. HTML is served byte for byte; Markdown is rendered.
