@@ -98,6 +98,10 @@ npm pack --dry-run
 
 Tests mock `fetch` and use a temporary `XDG_CONFIG_HOME`; nothing touches your real config. To run an unpublished checkout as `htmldoc`, `npm link` in the clone.
 
+## Feedback
+
+CLI bugs: [issues here](https://github.com/ajaxray/htmldoc-cli/issues). Feature requests, roadmap votes, and anything about the site: [ajaxray/htmldoc.space](https://github.com/ajaxray/htmldoc.space/issues).
+
 ## Related
 
 - Service and API: [ajaxray/htmldoc](https://github.com/ajaxray/htmldoc), live at [htmldoc.space](https://htmldoc.space).
