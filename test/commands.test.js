@@ -5,9 +5,10 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { readSecretFromTty } from '../src/commands.js';
-import { run, runBin, tempDir, jsonResponse, PAGE } from './helpers.js';
-import { writeConfig } from '../src/config.js';
+import { main, readSecretFromTty } from '../src/commands.js';
+import { openUrl, openerFor } from '../src/browser.js';
+import { run, runBin, tempDir, jsonResponse, capture, fakeClock, PAGE, PAIRING, CODE, SECRET } from './helpers.js';
+import { writeConfig, writePairing } from '../src/config.js';
 import { readState } from '../src/state.js';
 
 const KEY = 'hd_' + 'k'.repeat(40);
@@ -363,12 +364,13 @@ describe('HTMLDOC_API_URL guard', () => {
   });
 });
 
-describe('login', () => {
+describe('login --paste', () => {
   it('exits 1 with instructions when stdin is not a TTY and never blocks', async () => {
     const fetch = mockFetch(() => jsonResponse(200, { github_login: 'octo' }));
-    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: false } });
+    const r = await run(['login', '--paste'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: false } });
     assert.equal(r.code, 1);
     assert.equal(r.stdout, '');
+    assert.match(r.stderr, /interactive terminal/);
     assert.ok(r.stderr.includes(DASHBOARD));
     assert.ok(r.stderr.includes(LOGIN_CMD));
     assert.equal(fetch.mock.callCount(), 0);
@@ -377,7 +379,7 @@ describe('login', () => {
 
   it('stores nothing and exits 1 on a bad key', async () => {
     mockFetch(() => jsonResponse(401, { error: 'invalid API key' }));
-    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true }, readSecret: async () => 'hd_bad' });
+    const r = await run(['login', '--paste'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true }, readSecret: async () => 'hd_bad' });
     assert.equal(r.code, 1);
     assert.equal(r.stdout, '');
     assert.ok(r.stderr.includes('invalid API key'));
@@ -387,14 +389,14 @@ describe('login', () => {
 
   it('rejects an empty paste without a request', async () => {
     const fetch = mockFetch(() => jsonResponse(200, { github_login: 'octo' }));
-    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true }, readSecret: async () => '   ' });
+    const r = await run(['login', '--paste'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true }, readSecret: async () => '   ' });
     assert.equal(r.code, 1);
     assert.equal(fetch.mock.callCount(), 0);
   });
 
   it('validates via GET /me, creates the 0700 dir and 0600 config.json, and greets by login', async () => {
     const fetch = mockFetch(() => jsonResponse(200, { github_login: 'octo', live_pages: 0, max_live_pages: 100 }));
-    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true }, readSecret: async () => ` ${KEY}\n` });
+    const r = await run(['login', '--paste'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true }, readSecret: async () => ` ${KEY}\n` });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout, '');
     assert.ok(r.stderr.includes('Logged in as @octo'));
@@ -409,10 +411,387 @@ describe('login', () => {
   it('ignores HTMLDOC_API_KEY and stores the pasted key', async () => {
     const pasted = 'hd_' + 'p'.repeat(40);
     const fetch = mockFetch(() => jsonResponse(200, { github_login: 'octo' }));
-    const r = await run(['login'], { env, stdin: { isTTY: true }, readSecret: async () => pasted });
+    const r = await run(['login', '--paste'], { env, stdin: { isTTY: true }, readSecret: async () => pasted });
     assert.equal(r.code, 0);
     assert.equal(fetch.mock.calls[0].arguments[1].headers.Authorization, `Bearer ${pasted}`);
     assert.deepEqual(JSON.parse(await readFile(path.join(cfgDir, 'config.json'), 'utf8')), { apiKey: pasted });
+  });
+
+  it('refuses --paste together with --wait', async () => {
+    const fetch = mockFetch(() => jsonResponse(200, {}));
+    const r = await run(['login', '--paste', '--wait'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true } });
+    assert.equal(r.code, 1);
+    assert.equal(fetch.mock.callCount(), 0);
+  });
+});
+
+describe('login (handoff start)', () => {
+  const LINK = `https://htmldoc.space/connect/${CODE}`;
+
+  function pairFetch(body = PAIRING, status = 201) {
+    return mockFetch((url) => (url.endsWith('/api/v1/pair') ? jsonResponse(status, body) : jsonResponse(500, { error: 'unexpected request' })));
+  }
+
+  async function pairingFile() {
+    return JSON.parse(await readFile(path.join(cfgDir, 'pairing.json'), 'utf8'));
+  }
+
+  it('with no TTY: one pair call, announcement then link then code on stderr, empty stdout, pairing.json 0600, exit 0, no poll', async () => {
+    const fetch = pairFetch();
+    const opened = [];
+    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: false }, openUrl: (url) => (opened.push(url), true) });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, '');
+    assert.equal(fetch.mock.callCount(), 1);
+    const [url, init] = fetch.mock.calls[0].arguments;
+    assert.equal(String(url), 'https://htmldoc.space/api/v1/pair');
+    assert.equal(init.method, 'POST');
+    assert.equal(init.headers.Authorization, undefined);
+    const lines = r.stderr.trimEnd().split('\n');
+    const announce = lines.findIndex((l) => /signed in with GitHub/.test(l));
+    const link = lines.indexOf(`Open this link to approve: ${LINK}`);
+    const code = lines.indexOf(`Code: ${CODE}`);
+    assert.ok(announce >= 0, r.stderr);
+    assert.ok(link > announce, r.stderr);
+    assert.ok(code > link, r.stderr);
+    assert.ok(!r.stderr.includes(SECRET), 'device secret leaked to stderr');
+    assert.equal((await stat(path.join(cfgDir, 'pairing.json'))).mode & 0o777, 0o600);
+    const saved = await pairingFile();
+    assert.equal(saved.deviceSecret, SECRET);
+    assert.equal(saved.userCode, CODE);
+    assert.equal(saved.intervalSeconds, 5);
+    assert.equal(saved.origin, 'https://htmldoc.space');
+    assert.ok(!Number.isNaN(Date.parse(saved.expiresAt)));
+    assert.deepEqual(opened, [LINK]);
+    await assert.rejects(stat(path.join(cfgDir, 'config.json')));
+  });
+
+  it('prints "Opening your browser…" before openUrl is called', async () => {
+    pairFetch();
+    const stderr = capture();
+    let seenAtOpen = null;
+    const code = await main(['login'], {
+      env: { HOME: '/nonexistent', XDG_CONFIG_HOME: xdg },
+      stdout: capture(),
+      stderr,
+      stdin: { isTTY: false },
+      platform: 'darwin',
+      openUrl: () => {
+        seenAtOpen = stderr.data;
+        return true;
+      },
+    });
+    assert.equal(code, 0, stderr.data);
+    assert.ok(seenAtOpen !== null, 'openUrl was not called');
+    assert.ok(seenAtOpen.includes('Opening your browser…'), seenAtOpen);
+    assert.ok(seenAtOpen.includes(`Code: ${CODE}`), 'link and code precede the announcement');
+  });
+
+  it('skips the opener line and openUrl under --no-browser, HTMLDOC_NO_BROWSER=1, or when no opener applies', async () => {
+    pairFetch();
+    const opened = [];
+    const openUrl = (url) => (opened.push(url), true);
+    const a = await run(['login', '--no-browser'], { env: { XDG_CONFIG_HOME: xdg }, openUrl });
+    const b = await run(['login'], { env: { XDG_CONFIG_HOME: xdg, HTMLDOC_NO_BROWSER: '1' }, openUrl });
+    const c = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, openUrl, platform: 'linux' });
+    for (const r of [a, b, c]) {
+      assert.equal(r.code, 0, r.stderr);
+      assert.ok(!r.stderr.includes('Opening your browser'), r.stderr);
+      assert.ok(r.stderr.includes(LINK), 'the link is always printed');
+    }
+    assert.deepEqual(opened, []);
+  });
+
+  it('treats an openUrl failure as non-fatal', async () => {
+    pairFetch();
+    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, openUrl: () => false });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.stderr.includes(LINK));
+    await stat(path.join(cfgDir, 'pairing.json'));
+  });
+
+  it('builds the link locally, ignoring any URL the server sends, and hands exactly it to the opener', async () => {
+    pairFetch({ ...PAIRING, approve_url: 'https://evil.example/connect/x', url: 'https://evil.example/' });
+    const opened = [];
+    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg, HTMLDOC_API_URL: 'http://localhost:8000' }, openUrl: (url) => (opened.push(url), true) });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(opened, [`http://localhost:8000/connect/${CODE}`]);
+    assert.ok(!r.stderr.includes('evil.example'));
+  });
+
+  it('aborts with no openUrl call and no state when the code fails the pattern', async () => {
+    const opened = [];
+    for (const bad of ['short', 'has-dash-1234', 'toolongcode123456', 42, undefined, '../../etc/passwd']) {
+      pairFetch({ ...PAIRING, user_code: bad });
+      const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, openUrl: (url) => (opened.push(url), true) });
+      assert.equal(r.code, 1, `code ${bad} accepted`);
+      assert.equal(r.stdout, '');
+      await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+    }
+    assert.deepEqual(opened, []);
+  });
+
+  it('clamps interval to 1–60 and expires_in to at most 900 seconds', async () => {
+    const clock = fakeClock();
+    pairFetch({ ...PAIRING, interval: 0, expires_in: 3600 });
+    let r = await run(['login', '--no-browser'], { env: { XDG_CONFIG_HOME: xdg }, now: clock.now });
+    assert.equal(r.code, 0, r.stderr);
+    let saved = await pairingFile();
+    assert.equal(saved.intervalSeconds, 1);
+    assert.equal(Date.parse(saved.expiresAt) - clock.now(), 900_000);
+
+    pairFetch({ ...PAIRING, interval: 999, expires_in: 120 });
+    r = await run(['login', '--no-browser'], { env: { XDG_CONFIG_HOME: xdg }, now: clock.now });
+    assert.equal(r.code, 0, r.stderr);
+    saved = await pairingFile();
+    assert.equal(saved.intervalSeconds, 60);
+    assert.equal(Date.parse(saved.expiresAt) - clock.now(), 120_000);
+  });
+
+  it('a second login replaces the saved pairing', async () => {
+    pairFetch();
+    assert.equal((await run(['login', '--no-browser'], { env: { XDG_CONFIG_HOME: xdg } })).code, 0);
+    pairFetch({ ...PAIRING, user_code: 'ZyXwVuTs9876', device_secret: 'second-secret' });
+    assert.equal((await run(['login', '--no-browser'], { env: { XDG_CONFIG_HOME: xdg } })).code, 0);
+    const saved = await pairingFile();
+    assert.equal(saved.userCode, 'ZyXwVuTs9876');
+    assert.equal(saved.deviceSecret, 'second-secret');
+    assert.deepEqual((await readdir(cfgDir)).sort(), ['pairing.json']);
+  });
+
+  it('relays a server failure on pair as one line and writes nothing', async () => {
+    pairFetch({ error: 'Too Many Attempts.' }, 429);
+    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg } });
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr, /Too Many Attempts/);
+    await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+  });
+
+  it('rejects positionals and --timeout without --wait', async () => {
+    const fetch = pairFetch();
+    assert.equal((await run(['login', 'extra'], { env: { XDG_CONFIG_HOME: xdg } })).code, 1);
+    assert.equal((await run(['login', '--timeout', '30'], { env: { XDG_CONFIG_HOME: xdg } })).code, 1);
+    assert.equal(fetch.mock.callCount(), 0);
+  });
+});
+
+describe('login --wait', () => {
+  const e = () => ({ XDG_CONFIG_HOME: xdg });
+
+  async function savePairing(overrides = {}, clock = fakeClock()) {
+    await writePairing(cfgDir, {
+      deviceSecret: SECRET,
+      userCode: CODE,
+      expiresAt: new Date(clock.now() + 600_000).toISOString(),
+      intervalSeconds: 5,
+      origin: 'https://htmldoc.space',
+      ...overrides,
+    });
+    return clock;
+  }
+
+  /** Poll response factories in order (the last repeats); `me` answers GET /me. Anything else is a 500. */
+  function pollFetch(responses, me = { github_login: 'octo' }) {
+    let i = 0;
+    return mockFetch((url, init) => {
+      if (url.endsWith('/api/v1/pair/poll')) {
+        const next = responses[Math.min(i, responses.length - 1)];
+        i += 1;
+        return next(init);
+      }
+      if (url.endsWith('/api/v1/me')) return jsonResponse(200, me);
+      return jsonResponse(500, { error: `unexpected ${init.method} ${url}` });
+    });
+  }
+
+  const pending = () => jsonResponse(202, { status: 'pending' });
+  const approved = () => jsonResponse(200, { api_key: KEY, github_login: 'octo' });
+
+  it('polls 202, 202, 200 with the interval honoured, stores the key, deletes pairing.json, greets, and names the dashboard', async () => {
+    const clock = await savePairing();
+    const fetch = pollFetch([pending, pending, approved]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, '');
+    assert.ok(r.stderr.includes('Logged in as @octo'), r.stderr);
+    assert.ok(r.stderr.includes(`Dashboard: ${DASHBOARD}`), r.stderr);
+    assertNoKey(r);
+    assert.ok(!r.stderr.includes(SECRET));
+    const polls = fetch.mock.calls.filter((c) => String(c.arguments[0]).endsWith('/pair/poll'));
+    assert.equal(polls.length, 3);
+    for (const call of polls) {
+      const init = call.arguments[1];
+      assert.equal(init.method, 'POST');
+      assert.equal(init.headers.Authorization, undefined);
+      assert.deepEqual(JSON.parse(init.body), { device_secret: SECRET });
+    }
+    assert.deepEqual(clock.sleeps, [5000, 5000]);
+    const me = fetch.mock.calls.find((c) => String(c.arguments[0]).endsWith('/api/v1/me'));
+    assert.equal(me.arguments[1].headers.Authorization, `Bearer ${KEY}`);
+    assert.deepEqual(JSON.parse(await readFile(path.join(cfgDir, 'config.json'), 'utf8')), { apiKey: KEY });
+    await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+  });
+
+  it('a 429 slow_down adds 5 s to every later interval', async () => {
+    const clock = await savePairing();
+    pollFetch([pending, () => jsonResponse(429, { error: 'slow_down' }), pending, approved]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(clock.sleeps, [5000, 10000, 10000]);
+  });
+
+  it('a 429 without slow_down backs off by Retry-After, else by 5 s, and keeps polling', async () => {
+    const clock = await savePairing();
+    pollFetch([() => jsonResponse(429, { error: 'Too Many Attempts.' }, { 'Retry-After': '17' }), () => jsonResponse(429, { error: 'Too Many Attempts.' }), pending, approved]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(clock.sleeps, [17000, 10000, 5000]);
+  });
+
+  for (const [reason, pattern] of [
+    ['denied', /denied/],
+    ['expired', /expired/],
+    ['used', /already consumed, possibly by a poll whose reply was lost/],
+  ]) {
+    it(`410 ${reason} prints the reason, exits 1, writes no config, and removes pairing.json`, async () => {
+      const clock = await savePairing();
+      const fetch = pollFetch([() => jsonResponse(410, { error: reason })]);
+      const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+      assert.equal(r.code, 1);
+      assert.equal(r.stdout, '');
+      assert.match(r.stderr, pattern);
+      assert.ok(r.stderr.includes(LOGIN_CMD), r.stderr);
+      assert.ok(!r.stderr.includes(SECRET));
+      assert.equal(fetch.mock.callCount(), 1);
+      await assert.rejects(stat(path.join(cfgDir, 'config.json')));
+      await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+    });
+  }
+
+  it('gives up at the saved expiry with "timed out" and the retry hint', async () => {
+    const clock = fakeClock();
+    await savePairing({ expiresAt: new Date(clock.now() + 12_000).toISOString() }, clock);
+    const fetch = pollFetch([pending]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /timed out/);
+    assert.ok(r.stderr.includes(LOGIN_CMD));
+    assert.ok(fetch.mock.callCount() >= 2 && fetch.mock.callCount() <= 4, `polls: ${fetch.mock.callCount()}`);
+    assert.ok(clock.sleeps.every((ms) => ms <= 5000));
+    await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+    await assert.rejects(stat(path.join(cfgDir, 'config.json')));
+  });
+
+  it('--timeout shortens the wait below the pairing lifetime', async () => {
+    const clock = await savePairing();
+    const fetch = pollFetch([pending]);
+    const r = await run(['login', '--wait', '--timeout', '7'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /timed out/);
+    assert.equal(fetch.mock.callCount(), 3, 'polls at 0 s, 5 s, and the 7 s deadline');
+    assert.deepEqual(clock.sleeps, [5000, 2000]);
+    await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+  });
+
+  it('rejects a non-positive or non-numeric --timeout without a request', async () => {
+    await savePairing();
+    const fetch = pollFetch([approved]);
+    for (const bad of ['0', '-3', 'soon']) {
+      assert.equal((await run(['login', '--wait', '--timeout', bad], { env: e() })).code, 1);
+    }
+    assert.equal(fetch.mock.callCount(), 0);
+  });
+
+  it('with no pairing.json exits 1 with the retry hint and makes no request', async () => {
+    const fetch = pollFetch([approved]);
+    const r = await run(['login', '--wait'], { env: e() });
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, '');
+    assert.ok(r.stderr.includes(LOGIN_CMD), r.stderr);
+    assert.equal(fetch.mock.callCount(), 0);
+  });
+
+  it('refuses a pairing saved for another origin', async () => {
+    await savePairing({ origin: 'http://localhost:8000' });
+    const fetch = pollFetch([approved]);
+    const r = await run(['login', '--wait'], { env: e() });
+    assert.equal(r.code, 1);
+    assert.equal(fetch.mock.callCount(), 0);
+  });
+
+  it('keeps the stored key but exits 1 when /me rejects it after release', async () => {
+    const clock = await savePairing();
+    mockFetch((url) => (url.endsWith('/pair/poll') ? approved() : jsonResponse(401, { error: 'invalid or revoked API key' })));
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /invalid or revoked API key/);
+    assertNoKey(r);
+  });
+
+  it('never prints the device secret, even when the server line echoes it', async () => {
+    const clock = await savePairing();
+    pollFetch([() => jsonResponse(410, { error: `bad secret ${SECRET}` })]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 1);
+    assert.ok(!r.stderr.includes(SECRET), r.stderr);
+  });
+});
+
+describe('browser opener', () => {
+  function fakeSpawn(calls, { fail = false } = {}) {
+    return (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      if (fail) throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
+      return { unref() { calls.at(-1).unref = true; }, on() {} };
+    };
+  }
+
+  const URL_ = 'https://htmldoc.space/connect/AbCdEfGh1234';
+
+  it('uses `open` on darwin, detached and unreferenced, with an argument array', () => {
+    const calls = [];
+    assert.equal(openUrl(URL_, { platform: 'darwin', env: {}, spawn: fakeSpawn(calls) }), true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].cmd, 'open');
+    assert.deepEqual(calls[0].args, [URL_]);
+    assert.equal(calls[0].opts.detached, true);
+    assert.equal(calls[0].opts.stdio, 'ignore');
+    assert.ok(!calls[0].opts.shell);
+    assert.equal(calls[0].unref, true);
+  });
+
+  it('uses xdg-open on linux only when DISPLAY or WAYLAND_DISPLAY is set', () => {
+    const calls = [];
+    assert.equal(openUrl(URL_, { platform: 'linux', env: {}, spawn: fakeSpawn(calls) }), false);
+    assert.equal(calls.length, 0);
+    assert.equal(openUrl(URL_, { platform: 'linux', env: { DISPLAY: ':0' }, spawn: fakeSpawn(calls) }), true);
+    assert.equal(openUrl(URL_, { platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' }, spawn: fakeSpawn(calls) }), true);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].cmd, 'xdg-open');
+    assert.deepEqual(calls[0].args, [URL_]);
+  });
+
+  it('uses cmd /c start on win32 and nothing elsewhere', () => {
+    const calls = [];
+    assert.equal(openUrl(URL_, { platform: 'win32', env: {}, spawn: fakeSpawn(calls) }), true);
+    assert.equal(calls[0].cmd, 'cmd');
+    assert.deepEqual(calls[0].args, ['/c', 'start', '', URL_]);
+    assert.equal(openUrl(URL_, { platform: 'freebsd', env: { DISPLAY: ':0' }, spawn: fakeSpawn(calls) }), false);
+    assert.equal(calls.length, 1);
+  });
+
+  it('returns false when spawn throws', () => {
+    const calls = [];
+    assert.equal(openUrl(URL_, { platform: 'darwin', env: {}, spawn: fakeSpawn(calls, { fail: true }) }), false);
+  });
+
+  it('openerFor mirrors those rules', () => {
+    assert.deepEqual(openerFor('darwin', {}), ['open']);
+    assert.equal(openerFor('linux', {}), null);
+    assert.deepEqual(openerFor('linux', { DISPLAY: ':1' }), ['xdg-open']);
+    assert.deepEqual(openerFor('win32', {}), ['cmd', '/c', 'start', '']);
+    assert.equal(openerFor('sunos', {}), null);
   });
 });
 
@@ -508,10 +887,48 @@ describe('bin/htmldoc.js end to end', () => {
     assert.ok(r.stderr.includes(DASHBOARD) && r.stderr.includes(LOGIN_CMD), r.stderr);
   });
 
-  it('login with piped stdin exits 1 quickly', async () => {
-    const r = await runBin(['login'], { cwd: work, env: { XDG_CONFIG_HOME: xdg } });
+  it('login with piped stdin prints the link and exits 0 against a local stub', async () => {
+    const requests = [];
+    const server = createServer((req, res) => {
+      requests.push({ method: req.method, url: req.url, auth: req.headers.authorization });
+      res.setHeader('content-type', 'application/json');
+      if (req.method === 'POST' && req.url === '/api/v1/pair') {
+        res.statusCode = 201;
+        res.end(JSON.stringify(PAIRING));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: 'not found' }));
+      }
+    });
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const r = await runBin(['login'], { cwd: work, env: { XDG_CONFIG_HOME: xdg, HTMLDOC_API_URL: origin, HTMLDOC_NO_BROWSER: '1' } });
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.stdout, '');
+      assert.ok(r.stderr.includes(`Open this link to approve: ${origin}/connect/${CODE}`), r.stderr);
+      assert.ok(r.stderr.includes(`Code: ${CODE}`), r.stderr);
+      assert.ok(!r.stderr.includes(SECRET));
+      assert.ok(!r.stderr.includes('Opening your browser'));
+      assert.deepEqual(requests, [{ method: 'POST', url: '/api/v1/pair', auth: undefined }]);
+      assert.equal((await stat(path.join(cfgDir, 'pairing.json'))).mode & 0o777, 0o600);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((res) => server.close(res));
+    }
+  });
+
+  it('login --paste with piped stdin exits 1 quickly', async () => {
+    const r = await runBin(['login', '--paste'], { cwd: work, env: { XDG_CONFIG_HOME: xdg } });
     assert.equal(r.code, 1);
     assert.ok(r.stderr.includes(DASHBOARD));
+  });
+
+  it('login --wait with no pairing exits 1 with the hint and no request', async () => {
+    const r = await runBin(['login', '--wait'], { cwd: work, env: { XDG_CONFIG_HOME: xdg, HTMLDOC_API_URL: 'http://127.0.0.1:9' } });
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, '');
+    assert.ok(r.stderr.includes(LOGIN_CMD), r.stderr);
   });
 
   it('insecure API URL exits 1 before any request', async () => {
@@ -524,7 +941,7 @@ describe('bin/htmldoc.js end to end', () => {
   it('--version prints the package version', async () => {
     const r = await runBin(['--version'], { cwd: work });
     assert.equal(r.code, 0);
-    assert.equal(r.stdout.trim(), '0.1.0');
+    assert.equal(r.stdout.trim(), '0.2.0');
   });
 
   it('bin is executable and starts with a node shebang', async () => {

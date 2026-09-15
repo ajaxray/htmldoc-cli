@@ -2,8 +2,9 @@
  * HTTP client for /api/v1 (KTD14, KTD15, KTD16).
  *
  * Origin comes from HTMLDOC_API_URL (https anywhere; http only on loopback
- * hosts) or the production default. Every request carries the bearer key,
- * Accept, User-Agent, and a timeout. Failures become one-line CliErrors.
+ * hosts) or the production default. Every request carries Accept, User-Agent,
+ * and a timeout; all but the pairing calls carry the bearer key. Failures
+ * become one-line CliErrors.
  */
 import pkg from '../package.json' with { type: 'json' };
 
@@ -54,6 +55,12 @@ function looksLikeSizeError(message) {
   return /\b(too large|greater than|exceeds?|size|kilobytes?|kb|mb)\b/i.test(message);
 }
 
+/** Positive integer seconds from Retry-After, else undefined. */
+function retryAfterSeconds(response) {
+  const value = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 function fetchFailureReason(error) {
   if (error && (error.name === 'TimeoutError' || error.name === 'AbortError')) return null;
   const cause = error && error.cause;
@@ -70,13 +77,18 @@ export class ApiClient {
     this.fetchImpl = fetchImpl;
   }
 
-  async request(method, route, { body } = {}) {
+  /**
+   * Send one request and parse the body. Returns { response, json, serverLine }
+   * without judging the status; `request()` and the pairing calls decide.
+   */
+  async send(method, route, { body, auth = true, contentType } = {}) {
     const url = `${this.origin}${API_PREFIX}${route}`;
     const headers = {
-      Authorization: `Bearer ${this.apiKey}`,
       Accept: 'application/json',
       'User-Agent': `${PACKAGE_NAME}/${VERSION}`,
     };
+    if (auth) headers.Authorization = `Bearer ${this.apiKey}`;
+    if (contentType) headers['Content-Type'] = contentType;
     // Resolve fetch at call time so tests can mock globalThis.fetch.
     const doFetch = this.fetchImpl || globalThis.fetch;
 
@@ -101,29 +113,79 @@ export class ApiClient {
     } catch {
       json = undefined;
     }
+    const serverLine = json && typeof json.error === 'string' && json.error.trim() !== '' ? json.error.trim().split('\n')[0] : null;
+    return { response, json, serverLine };
+  }
 
+  /** Turn a non-2xx response into the one-line CliError the commands print. */
+  failure({ response, serverLine }) {
+    const status = response.status;
+
+    if (status === 413 || (status === 422 && serverLine && looksLikeSizeError(serverLine))) {
+      return new CliError(TOO_LARGE, { status });
+    }
+    if (serverLine === null) {
+      return new CliError(`server returned HTTP ${status}`, { status });
+    }
+    if (status === 429) {
+      const retryAfter = retryAfterSeconds(response);
+      const hint = retryAfter !== undefined ? `retry after ${retryAfter} seconds` : 'try again later';
+      // The server's 429 line already carries the retry-after wording; only add ours when it does not.
+      const alreadyHinted = /retry after|try again/i.test(serverLine);
+      return new CliError(alreadyHinted ? serverLine : `${serverLine} (${hint})`, { status });
+    }
+    return new CliError(serverLine, { status });
+  }
+
+  async request(method, route, options = {}) {
+    const result = await this.send(method, route, options);
+    const { response, json } = result;
     if (response.ok) {
       if (!json || typeof json !== 'object') throw new CliError(`server returned HTTP ${response.status} with an unreadable body`);
       return json;
     }
+    throw this.failure(result);
+  }
 
-    const serverLine = json && typeof json.error === 'string' && json.error.trim() !== '' ? json.error.trim().split('\n')[0] : null;
-    const status = response.status;
+  /** Start a handoff (KTD5): { user_code, device_secret, expires_in, interval }. No bearer header. */
+  pair() {
+    return this.request('POST', '/pair', { auth: false });
+  }
 
-    if (status === 413 || (status === 422 && serverLine && looksLikeSizeError(serverLine))) {
-      throw new CliError(TOO_LARGE, { status });
+  /**
+   * Poll a handoff with the device secret. Never throws for the four expected
+   * outcomes; the secret is never placed in any message.
+   * @returns {Promise<
+   *   | { status: 'pending' }
+   *   | { status: 'ok', apiKey: string, githubLogin: string|undefined }
+   *   | { status: 'gone', reason: string|null }
+   *   | { status: 'slow_down', reason: string|null, retryAfterSeconds: number|undefined }
+   * >}
+   */
+  async pollPair(deviceSecret) {
+    const result = await this.send('POST', '/pair/poll', {
+      auth: false,
+      contentType: 'application/json',
+      body: JSON.stringify({ device_secret: deviceSecret }),
+    });
+    const { response, json, serverLine } = result;
+    switch (response.status) {
+      case 202:
+        return { status: 'pending' };
+      case 200: {
+        const apiKey = json && typeof json.api_key === 'string' ? json.api_key.trim() : '';
+        if (apiKey === '') throw new CliError('server approved the pairing but sent no API key');
+        const githubLogin = json && typeof json.github_login === 'string' ? json.github_login : undefined;
+        return { status: 'ok', apiKey, githubLogin };
+      }
+      case 410:
+        return { status: 'gone', reason: serverLine };
+      case 429:
+        return { status: 'slow_down', reason: serverLine, retryAfterSeconds: retryAfterSeconds(response) };
+      default:
+        if (response.ok) throw new CliError(`server returned HTTP ${response.status} while polling the pairing`);
+        throw this.failure(result);
     }
-    if (serverLine === null) {
-      throw new CliError(`server returned HTTP ${status}`, { status });
-    }
-    if (status === 429) {
-      const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
-      const hint = Number.isFinite(retryAfter) && retryAfter > 0 ? `retry after ${retryAfter} seconds` : 'try again later';
-      // The server's 429 line already carries the retry-after wording; only add ours when it does not.
-      const alreadyHinted = /retry after|try again/i.test(serverLine);
-      throw new CliError(alreadyHinted ? serverLine : `${serverLine} (${hint})`, { status });
-    }
-    throw new CliError(serverLine, { status });
   }
 
   me() {

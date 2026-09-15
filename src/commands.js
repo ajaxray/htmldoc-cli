@@ -1,16 +1,18 @@
 /**
- * Command layer: login, upload, list, delete (KTD15, KTD16).
+ * Command layer: login, upload, list, delete (KTD15, KTD16, KTD5).
  *
  * `main(argv, deps)` returns the exit code and never throws a CliError; the
  * bin maps anything else to one stderr line. `deps` exist so tests can inject
- * streams, env, cwd, the timeout, and the hidden-input reader.
+ * streams, env, cwd, the timeout, the hidden-input reader, the browser
+ * opener, the poll sleep, the clock, and the platform.
  */
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { ApiClient, MAX_HTML_BYTES, MAX_MARKDOWN_BYTES, TOO_LARGE, VERSION, dashboardUrl, resolveOrigin } from './api.js';
-import { configDir, readConfig, resolveApiKey, writeConfig } from './config.js';
+import { openUrl, openerFor } from './browser.js';
+import { clearPairing, configDir, readConfig, readPairing, resolveApiKey, writeConfig, writePairing } from './config.js';
 import { CliError, createIO, keyInstructions, PACKAGE_NAME } from './output.js';
 import { forgetPage, lookupPage, readState, recordPage } from './state.js';
 
@@ -18,17 +20,31 @@ const RESERVED = new Set(['login', 'list', 'delete']);
 const KINDS = { '.html': 'html', '.htm': 'html', '.md': 'markdown', '.markdown': 'markdown' };
 const ID_PATTERN = /^[0-9A-Za-z]+$/;
 
+/** A pairing user code: 12 base62 characters (KTD1). Only such a code is ever placed in a link. */
+const USER_CODE_PATTERN = /^[0-9A-Za-z]{12}$/;
+const MIN_INTERVAL_S = 1;
+const MAX_INTERVAL_S = 60;
+const DEFAULT_INTERVAL_S = 5;
+const MAX_EXPIRES_IN_S = 15 * 60;
+const DEFAULT_EXPIRES_IN_S = 10 * 60;
+const BACKOFF_S = 5;
+
 export const USAGE = [
   'Usage:',
   '  htmldoc <file> [--update <id|url>] [--json]   share an .html, .htm, .md, or .markdown file',
-  '  htmldoc login                                 paste and store your API key',
+  '  htmldoc login [--no-browser]                  start signing in: prints an approval link and opens it',
+  '  htmldoc login --wait [--timeout <seconds>]    wait for that approval, then store the key',
+  '  htmldoc login --paste                         paste and store your API key (interactive terminal)',
   '  htmldoc list [--json]                         list your live pages',
   '  htmldoc delete <id|url>                       delete a page',
   '',
   'Environment:',
-  '  HTMLDOC_API_KEY   use this key instead of the stored one',
-  '  HTMLDOC_API_URL   API origin (default https://htmldoc.space)',
+  '  HTMLDOC_API_KEY      use this key instead of the stored one',
+  '  HTMLDOC_API_URL      API origin (default https://htmldoc.space)',
+  '  HTMLDOC_NO_BROWSER   set to 1 to never open a browser on login',
 ].join('\n');
+
+const loginHint = () => `run: npx ${PACKAGE_NAME} login`;
 
 export async function main(argv, deps = {}) {
   const env = deps.env ?? process.env;
@@ -41,6 +57,10 @@ export async function main(argv, deps = {}) {
     cwd: deps.cwd ?? process.cwd(),
     timeoutMs: deps.timeoutMs,
     readSecret: deps.readSecret ?? readSecretFromTty,
+    openUrl: deps.openUrl ?? openUrl,
+    sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    now: deps.now ?? (() => Date.now()),
+    platform: deps.platform ?? process.platform,
     dir: configDir(env),
   };
 
@@ -266,9 +286,173 @@ async function remove(ctx, args) {
 }
 
 async function login(ctx, args) {
-  const { positionals } = parse(args, {});
-  if (positionals.length !== 0) throw new CliError('login takes no arguments; the key is pasted, never passed', { hints: USAGE.split('\n') });
+  const { values, positionals } = parse(args, {
+    paste: { type: 'boolean', default: false },
+    wait: { type: 'boolean', default: false },
+    timeout: { type: 'string' },
+    'no-browser': { type: 'boolean', default: false },
+  });
+  if (positionals.length !== 0) throw new CliError('login takes no arguments; the key is never passed on the command line', { hints: USAGE.split('\n') });
+  if (values.paste && values.wait) throw new CliError('login takes --paste or --wait, not both', { hints: USAGE.split('\n') });
+  if (values.timeout !== undefined && !values.wait) throw new CliError('--timeout only applies to login --wait', { hints: USAGE.split('\n') });
 
+  if (values.paste) return loginPaste(ctx);
+  if (values.wait) return loginWait(ctx, values.timeout);
+  return loginStart(ctx, { noBrowser: values['no-browser'] });
+}
+
+function clampNumber(value, { min, max, fallback }) {
+  const n = typeof value === 'number' ? value : Number.parseFloat(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+/**
+ * Phase one (KTD5): create the pairing, print the link and code, try the
+ * browser, save pairing.json, exit 0. Never blocks on approval.
+ */
+async function loginStart(ctx, { noBrowser }) {
+  const api = await client(ctx, undefined);
+  const pairing = await api.pair();
+
+  const userCode = typeof pairing.user_code === 'string' ? pairing.user_code : '';
+  if (!USER_CODE_PATTERN.test(userCode)) throw new CliError('server sent an invalid pairing code; try again in a moment');
+  const deviceSecret = typeof pairing.device_secret === 'string' ? pairing.device_secret.trim() : '';
+  if (deviceSecret === '') throw new CliError('server sent no pairing secret; try again in a moment');
+
+  const intervalSeconds = clampNumber(pairing.interval, { min: MIN_INTERVAL_S, max: MAX_INTERVAL_S, fallback: DEFAULT_INTERVAL_S });
+  const expiresIn = clampNumber(pairing.expires_in, { min: 1, max: MAX_EXPIRES_IN_S, fallback: DEFAULT_EXPIRES_IN_S });
+  const expiresAt = new Date(ctx.now() + expiresIn * 1000).toISOString();
+
+  // The link is built here from the origin and the validated code; any URL the server sends is ignored.
+  const link = `${ctx.origin}/connect/${userCode}`;
+
+  await writePairing(ctx.dir, { deviceSecret, userCode, expiresAt, intervalSeconds, origin: ctx.origin });
+
+  const host = new URL(ctx.origin).host;
+  ctx.io.err(`${host} needs an account signed in with GitHub, so we're sending you there.`);
+  ctx.io.err(`Open this link to approve: ${link}`);
+  ctx.io.err(`Code: ${userCode}`);
+
+  const skipBrowser = noBrowser || ctx.env.HTMLDOC_NO_BROWSER === '1';
+  if (!skipBrowser && openerFor(ctx.platform, ctx.env)) {
+    ctx.io.err('Opening your browser…');
+    let opened = false;
+    try {
+      opened = ctx.openUrl(link, { platform: ctx.platform, env: ctx.env }) === true;
+    } catch {
+      opened = false;
+    }
+    if (!opened) ctx.io.err('Could not open a browser; open the link above yourself.');
+  }
+  ctx.io.err(`After approving, run: npx ${PACKAGE_NAME} login --wait`);
+  return 0;
+}
+
+function parseTimeoutSeconds(raw) {
+  if (raw === undefined) return undefined;
+  const seconds = /^\d+$/.test(raw.trim()) ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0) throw new CliError(`--timeout expects a positive number of seconds, got: ${raw}`);
+  return seconds;
+}
+
+function goneMessage(reason) {
+  switch (reason) {
+    case 'denied':
+      return 'the approval was denied.';
+    case 'expired':
+      return 'the pairing code expired before it was approved.';
+    case 'used':
+      return 'this approval was already consumed, possibly by a poll whose reply was lost; run login again.';
+    default:
+      return reason ? `pairing ended: ${reason}` : 'pairing ended before it was approved.';
+  }
+}
+
+/**
+ * Phase two (KTD5): poll with the saved device secret until the key arrives,
+ * the server says the pairing is gone, or the deadline passes. The secret is
+ * never placed in a message.
+ */
+async function loginWait(ctx, timeoutArg) {
+  const timeoutSeconds = parseTimeoutSeconds(timeoutArg);
+
+  const pairing = await readPairing(ctx.dir);
+  const deviceSecret = pairing && typeof pairing.deviceSecret === 'string' ? pairing.deviceSecret : '';
+  const expiresAtMs = pairing ? Date.parse(pairing.expiresAt) : Number.NaN;
+  if (!pairing || deviceSecret === '' || Number.isNaN(expiresAtMs)) {
+    if (pairing) await clearPairing(ctx.dir);
+    throw new CliError('no sign-in is waiting for approval.', { hints: [loginHint()] });
+  }
+  if (typeof pairing.origin === 'string' && pairing.origin !== ctx.origin) {
+    throw new CliError(`the pending sign-in is for ${pairing.origin}, not ${ctx.origin}.`, { hints: [`${loginHint()} again against this origin`] });
+  }
+  const userCode = typeof pairing.userCode === 'string' ? pairing.userCode : '';
+  const intervalSeconds = clampNumber(pairing.intervalSeconds, { min: MIN_INTERVAL_S, max: MAX_INTERVAL_S, fallback: DEFAULT_INTERVAL_S });
+
+  const start = ctx.now();
+  const deadline = timeoutSeconds === undefined ? expiresAtMs : Math.min(expiresAtMs, start + timeoutSeconds * 1000);
+  const budget = Math.max(0, Math.round((deadline - start) / 1000));
+  ctx.io.err(`Waiting for approval${userCode ? ` of code ${userCode}` : ''} (up to ${budget}s)…`);
+
+  try {
+    return await pollUntilDone(ctx, { deviceSecret, intervalSeconds, deadline });
+  } catch (error) {
+    // redact() cannot recognise the device secret; make sure no server line that echoes it reaches stderr.
+    if (error instanceof CliError) {
+      error.message = scrub(error.message, deviceSecret);
+      error.hints = error.hints.map((hint) => scrub(hint, deviceSecret));
+    }
+    throw error;
+  }
+}
+
+function scrub(text, secret) {
+  return secret === '' ? text : String(text).split(secret).join('[redacted]');
+}
+
+async function pollUntilDone(ctx, { deviceSecret, intervalSeconds: initialInterval, deadline }) {
+  let intervalSeconds = initialInterval;
+  const api = await client(ctx, undefined);
+  for (;;) {
+    const result = await api.pollPair(deviceSecret);
+
+    if (result.status === 'ok') {
+      await writeConfig(ctx.dir, { apiKey: result.apiKey });
+      await clearPairing(ctx.dir);
+      let me;
+      try {
+        me = await (await client(ctx, result.apiKey)).me();
+      } catch (error) {
+        throw withKeyHints(ctx, error);
+      }
+      ctx.io.err(`Logged in as @${me.github_login}`);
+      ctx.io.err(`Dashboard: ${dashboardUrl(ctx.origin)}`);
+      return 0;
+    }
+    if (result.status === 'gone') {
+      await clearPairing(ctx.dir);
+      throw new CliError(goneMessage(result.reason), { hints: [loginHint()] });
+    }
+
+    let delaySeconds = intervalSeconds;
+    if (result.status === 'slow_down') {
+      // Any 429 is a back-off, never a failure. A server-side slow_down raises the interval for good.
+      if (result.reason === 'slow_down') intervalSeconds = Math.min(MAX_INTERVAL_S, intervalSeconds + BACKOFF_S);
+      delaySeconds = result.retryAfterSeconds ?? (result.reason === 'slow_down' ? intervalSeconds : intervalSeconds + BACKOFF_S);
+    }
+
+    const remainingMs = deadline - ctx.now();
+    if (remainingMs <= 0) {
+      await clearPairing(ctx.dir);
+      throw new CliError('timed out waiting for approval.', { hints: [loginHint()] });
+    }
+    await ctx.sleep(Math.min(delaySeconds * 1000, remainingMs));
+  }
+}
+
+/** Today's paste flow (R17): hidden input on an interactive terminal. */
+async function loginPaste(ctx) {
   const dashboard = dashboardUrl(ctx.origin);
   if (!ctx.stdin.isTTY) {
     throw new CliError('login needs an interactive terminal to paste the key (stdin is not a TTY).', {

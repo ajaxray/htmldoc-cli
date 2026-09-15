@@ -1,9 +1,10 @@
 /**
- * Config directory and config.json (KTD15).
+ * Config directory, config.json (KTD15), and pairing.json (KTD5).
  *
  * Directory: $XDG_CONFIG_HOME/htmldoc, default ~/.config/htmldoc, mode 0700.
  * config.json (mode 0600) holds { apiKey } and is written only by `login`.
- * Writes go to a temp file in the same directory, then rename.
+ * pairing.json (mode 0600) holds an in-flight handoff between `login` and
+ * `login --wait`. Writes go to a temp file in the same directory, then rename.
  */
 import { chmod, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -13,6 +14,7 @@ import path from 'node:path';
 import { CliError, PACKAGE_NAME } from './output.js';
 
 export const CONFIG_FILE = 'config.json';
+export const PAIRING_FILE = 'pairing.json';
 
 export function configDir(env = process.env) {
   const base = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() !== '' ? env.XDG_CONFIG_HOME : path.join(env.HOME || homedir(), '.config');
@@ -70,6 +72,30 @@ export async function readConfig(dir) {
 export async function writeConfig(dir, config) {
   await ensureDir(dir);
   await writeAtomic(path.join(dir, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`, 0o600);
+}
+
+/**
+ * The saved handoff: { deviceSecret, userCode, expiresAt (ISO), intervalSeconds, origin }.
+ * Returns null when there is none. The file's content is never quoted in an error.
+ */
+export async function readPairing(dir) {
+  const state = await readJson(path.join(dir, PAIRING_FILE), null, (file) => {
+    throw new CliError(`${file} is not valid JSON; delete it, then run: npx ${PACKAGE_NAME} login`);
+  });
+  return state && typeof state === 'object' && !Array.isArray(state) ? state : null;
+}
+
+export async function writePairing(dir, state) {
+  await ensureDir(dir);
+  await writeAtomic(path.join(dir, PAIRING_FILE), `${JSON.stringify(state, null, 2)}\n`, 0o600);
+}
+
+export async function clearPairing(dir) {
+  try {
+    await unlink(path.join(dir, PAIRING_FILE));
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+  }
 }
 
 /** HTMLDOC_API_KEY wins over the stored key. */

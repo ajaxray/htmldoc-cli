@@ -134,6 +134,79 @@ describe('ApiClient', () => {
     await assert.rejects(client().me(), (e) => e.message === 'could not reach https://htmldoc.space: ECONNREFUSED');
   });
 
+  describe('pairing', () => {
+    const SECRET = 'device-secret-' + 's'.repeat(30);
+
+    it('pair() POSTs to /pair with Accept and User-Agent but no Authorization, and returns the body', async () => {
+      const body = { user_code: 'AbCdEfGh1234', device_secret: SECRET, expires_in: 600, interval: 5 };
+      mockFetch(async () => jsonResponse(201, body));
+      const result = await client().pair();
+      assert.deepEqual(result, body);
+      const [url, init] = fetch.mock.calls[0].arguments;
+      assert.equal(String(url), 'https://htmldoc.space/api/v1/pair');
+      assert.equal(init.method, 'POST');
+      assert.equal(init.headers.Authorization, undefined);
+      assert.ok(!('authorization' in init.headers));
+      assert.equal(init.headers.Accept, 'application/json');
+      assert.equal(init.headers['User-Agent'], `htmldoc-cli/${VERSION}`);
+      assert.equal(init.body, undefined);
+    });
+
+    it('pair() works with no apiKey at all and still throws server errors as CliError', async () => {
+      mockFetch(async () => jsonResponse(429, { error: 'Too Many Attempts.' }, { 'Retry-After': '9' }));
+      await assert.rejects(
+        new ApiClient({ origin: 'https://htmldoc.space', timeoutMs: 1000 }).pair(),
+        (e) => e instanceof CliError && e.status === 429 && /Too Many Attempts\. \(retry after 9 seconds\)/.test(e.message),
+      );
+      mockFetch(async () => new Response('<html>502</html>', { status: 502 }));
+      await assert.rejects(client().pair(), (e) => e.message === 'server returned HTTP 502');
+    });
+
+    it('pollPair() POSTs JSON {device_secret} without Authorization', async () => {
+      mockFetch(async () => jsonResponse(202, { status: 'pending' }));
+      await client().pollPair(SECRET);
+      const [url, init] = fetch.mock.calls[0].arguments;
+      assert.equal(String(url), 'https://htmldoc.space/api/v1/pair/poll');
+      assert.equal(init.method, 'POST');
+      assert.equal(init.headers.Authorization, undefined);
+      assert.equal(init.headers['Content-Type'], 'application/json');
+      assert.deepEqual(JSON.parse(init.body), { device_secret: SECRET });
+    });
+
+    it('pollPair() maps 202, 200, 410, and 429 to typed results instead of throwing', async () => {
+      mockFetch(async () => jsonResponse(202, { status: 'pending' }));
+      assert.deepEqual(await client().pollPair(SECRET), { status: 'pending' });
+
+      mockFetch(async () => jsonResponse(200, { api_key: KEY, github_login: 'octo' }));
+      assert.deepEqual(await client().pollPair(SECRET), { status: 'ok', apiKey: KEY, githubLogin: 'octo' });
+
+      for (const reason of ['denied', 'expired', 'used']) {
+        mockFetch(async () => jsonResponse(410, { error: reason }));
+        assert.deepEqual(await client().pollPair(SECRET), { status: 'gone', reason });
+      }
+
+      mockFetch(async () => jsonResponse(429, { error: 'slow_down' }, { 'Retry-After': '8' }));
+      assert.deepEqual(await client().pollPair(SECRET), { status: 'slow_down', reason: 'slow_down', retryAfterSeconds: 8 });
+
+      mockFetch(async () => jsonResponse(429, { error: 'Too Many Attempts.' }));
+      assert.deepEqual(await client().pollPair(SECRET), { status: 'slow_down', reason: 'Too Many Attempts.', retryAfterSeconds: undefined });
+
+      mockFetch(async () => new Response('', { status: 429 }));
+      assert.deepEqual(await client().pollPair(SECRET), { status: 'slow_down', reason: null, retryAfterSeconds: undefined });
+    });
+
+    it('pollPair() rejects a 200 without an api_key and still throws other statuses', async () => {
+      mockFetch(async () => jsonResponse(200, { github_login: 'octo' }));
+      await assert.rejects(client().pollPair(SECRET), (e) => e instanceof CliError && !e.message.includes(SECRET));
+      mockFetch(async () => jsonResponse(410, {}));
+      assert.deepEqual(await client().pollPair(SECRET), { status: 'gone', reason: null });
+      mockFetch(async () => jsonResponse(404, { error: 'not found' }));
+      await assert.rejects(client().pollPair(SECRET), (e) => e instanceof CliError && e.status === 404);
+      mockFetch(async () => new Response('<html>502</html>', { status: 502 }));
+      await assert.rejects(client().pollPair(SECRET), (e) => e.message === 'server returned HTTP 502');
+    });
+  });
+
   it('gives up within the timeout when the server never responds', async () => {
     const server = createServer(() => {
       /* never respond */
