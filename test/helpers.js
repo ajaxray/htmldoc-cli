@@ -40,8 +40,18 @@ export const PAGE = {
   kind: 'markdown',
 };
 
-/** Run the command layer in-process with injected streams and env. */
-export async function run(argv, { env = {}, stdin = { isTTY: false }, timeoutMs, readSecret, cwd } = {}) {
+export const CODE = 'AbCdEfGh1234';
+export const SECRET = 'device-secret-' + 's'.repeat(30);
+
+export const PAIRING = { user_code: CODE, device_secret: SECRET, expires_in: 600, interval: 5 };
+
+/**
+ * Run the command layer in-process with injected streams and env.
+ *
+ * `openUrl` and `sleep` default to no-ops that never spawn or wait; `now` and
+ * `platform` default to a fixed clock and darwin so the opener applies.
+ */
+export async function run(argv, { env = {}, stdin = { isTTY: false }, timeoutMs, readSecret, cwd, openUrl, sleep, now, platform = 'darwin' } = {}) {
   const stdout = capture();
   const stderr = capture();
   const code = await main(argv, {
@@ -52,8 +62,29 @@ export async function run(argv, { env = {}, stdin = { isTTY: false }, timeoutMs,
     timeoutMs,
     readSecret,
     cwd,
+    openUrl: openUrl ?? (() => true),
+    sleep: sleep ?? (async () => {}),
+    now,
+    platform,
   });
   return { code, stdout: stdout.data, stderr: stderr.data };
+}
+
+/** A fake clock plus a sleep that advances it, so `--wait` deadlines are testable without waiting. */
+export function fakeClock(start = 1_700_000_000_000) {
+  let t = start;
+  const sleeps = [];
+  return {
+    now: () => t,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      t += ms;
+    },
+    sleeps,
+    advance(ms) {
+      t += ms;
+    },
+  };
 }
 
 /** Spawn the real bin for end-to-end cases. */

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { configDir, readConfig, writeConfig, resolveApiKey, writeAtomic } from '../src/config.js';
+import { configDir, readConfig, writeConfig, resolveApiKey, writeAtomic, PAIRING_FILE, readPairing, writePairing, clearPairing } from '../src/config.js';
 import { tempDir } from './helpers.js';
 
 describe('config', () => {
@@ -54,6 +54,62 @@ describe('config', () => {
     assert.equal(resolveApiKey({}, { apiKey: 'hd_file' }), 'hd_file');
     assert.equal(resolveApiKey({ HTMLDOC_API_KEY: '  ' }, {}), undefined);
     assert.equal(resolveApiKey({}, {}), undefined);
+  });
+
+  describe('pairing.json', () => {
+    const state = {
+      deviceSecret: 'device-secret-' + 's'.repeat(30),
+      userCode: 'AbCdEfGh1234',
+      expiresAt: '2026-09-16T10:10:00.000Z',
+      intervalSeconds: 5,
+      origin: 'https://htmldoc.space',
+    };
+
+    it('readPairing returns null when the file is missing', async () => {
+      assert.equal(await readPairing(path.join(dir, 'missing')), null);
+    });
+
+    it('writePairing creates the 0700 dir and a 0600 pairing.json via a temp file; readPairing returns it', async () => {
+      const target = path.join(dir, 'htmldoc');
+      await writePairing(target, state);
+      assert.equal((await stat(target)).mode & 0o777, 0o700);
+      assert.equal((await stat(path.join(target, PAIRING_FILE))).mode & 0o777, 0o600);
+      assert.deepEqual(await readPairing(target), state);
+      assert.deepEqual(await readdir(target), ['pairing.json']);
+    });
+
+    it('writePairing replaces an earlier pairing in full', async () => {
+      const target = path.join(dir, 'htmldoc');
+      await writePairing(target, state);
+      await writePairing(target, { ...state, userCode: 'ZyXwVuTs9876', deviceSecret: 'second' });
+      assert.deepEqual(await readPairing(target), { ...state, userCode: 'ZyXwVuTs9876', deviceSecret: 'second' });
+    });
+
+    it('clearPairing removes the file and is quiet when it is already gone', async () => {
+      const target = path.join(dir, 'htmldoc');
+      await writePairing(target, state);
+      await clearPairing(target);
+      assert.equal(await readPairing(target), null);
+      await clearPairing(target);
+      await clearPairing(path.join(dir, 'never-made'));
+    });
+
+    it('readPairing rejects malformed or non-object content with a one-line error that names the file, not the content', async () => {
+      const target = path.join(dir, 'htmldoc');
+      await writePairing(target, state);
+      await writeAtomic(path.join(target, PAIRING_FILE), '{not json', 0o600);
+      await assert.rejects(readPairing(target), (e) => /pairing\.json/.test(e.message) && !/\n/.test(e.message) && !/not json/.test(e.message));
+      await writeAtomic(path.join(target, PAIRING_FILE), '[1,2]', 0o600);
+      assert.equal(await readPairing(target), null);
+    });
+
+    it('config.json is untouched by pairing writes', async () => {
+      const target = path.join(dir, 'htmldoc');
+      await writeConfig(target, { apiKey: 'hd_' + 'a'.repeat(40) });
+      await writePairing(target, state);
+      await clearPairing(target);
+      assert.deepEqual(await readConfig(target), { apiKey: 'hd_' + 'a'.repeat(40) });
+    });
   });
 
   it('rejects a config.json that is not valid JSON with a one-line error', async () => {

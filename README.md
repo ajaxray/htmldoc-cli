@@ -13,8 +13,14 @@ The link is unlisted, lives 30 days, and can be updated in place so the URL neve
 
 ## Setup, once
 
-1. Sign in at [htmldoc.space](https://htmldoc.space) with GitHub and copy your API key.
-2. Run `npx -y htmldoc-cli login` and paste it.
+```sh
+npx -y htmldoc-cli login          # prints an approval link and opens it in your browser
+npx -y htmldoc-cli login --wait   # after you click Approve: stores the key, says who you are
+```
+
+`login` needs no interactive terminal, so an agent can run it for you. It prints `Open this link to approve: https://htmldoc.space/connect/<code>` and the code, then exits at once. Sign in there with GitHub (an account is created if you have none), check that the code matches, and click Approve. `login --wait` polls until the approval lands, times out, or is denied. Pass `--no-browser` (or set `HTMLDOC_NO_BROWSER=1`) to only print the link, for example on a headless machine; open it on any device.
+
+Prefer to copy the key yourself? Sign in at [htmldoc.space/dashboard](https://htmldoc.space/dashboard), copy the key, and run `npx -y htmldoc-cli login --paste`.
 
 Prefer a global install? `npm i -g htmldoc-cli` gives you `htmldoc` on PATH. Zero dependencies; needs Node 22 or newer.
 
@@ -46,7 +52,9 @@ Agents write better HTML than Markdown, and the Claude Code team [says so with t
 | Command | What it does |
 |---|---|
 | `htmldoc <file> [--update <id\|url>] [--json]` | Upload an `.html`, `.htm`, `.md`, or `.markdown` file. With `--update` the existing page keeps its URL and gets a fresh 30 days. |
-| `htmldoc login` | Paste your API key (hidden input) and store it. Needs an interactive terminal. |
+| `htmldoc login [--no-browser]` | Start signing in: prints an approval link and code, opens the link in your browser (unless `--no-browser` or `HTMLDOC_NO_BROWSER=1`), and exits 0 at once. Running it again replaces the pending request. |
+| `htmldoc login --wait [--timeout <seconds>]` | Wait for that approval, then store the key and print `Logged in as @you` and the dashboard URL. Gives up at the request's expiry (10 minutes) or `--timeout`, whichever is sooner. |
+| `htmldoc login --paste` | Paste your API key (hidden input) and store it. Needs an interactive terminal. |
 | `htmldoc list [--json]` | List your live pages. |
 | `htmldoc delete <id\|url>` | Delete a page. No confirmation prompt. |
 | `htmldoc --version`, `htmldoc --help` | Version and usage. |
@@ -72,7 +80,11 @@ Typical failure lines:
 | Unsupported extension | `unsupported file type ".txt": use .html, .htm, .md, or .markdown` |
 | Over the size cap, locally or from the server | `file is too large: HTML files up to 2 MB, Markdown files up to 512 KB` |
 | Bad encoding | `file is not valid UTF-8` or `file is UTF-16 (byte-order mark found); save it as UTF-8` |
-| Rate limited (429) | the server's line plus `(retry after N seconds)` |
+| Rate limited (429) | the server's line plus `(retry after N seconds)`. During `login --wait` a 429 is never a failure: the CLI backs off and keeps polling. |
+| `login --wait` with nothing pending | `no sign-in is waiting for approval.` then `run: npx htmldoc-cli login` |
+| Approval denied, expired, or already consumed | one line naming the outcome (a consumed approval says the reply may have been lost), then the same `run: npx htmldoc-cli login` hint. The pending request is forgotten. |
+| `login --wait` ran out of time | `timed out waiting for approval.` then the same hint |
+| `login --paste` without a terminal | `login needs an interactive terminal to paste the key (stdin is not a TTY).` then where to get a key |
 | Page deleted or purged on `--update` (410) | the server's line |
 | Server down or unreachable | `could not reach <origin>: <reason>` (also used for the 60-second timeout) |
 | Non-JSON error body (for example a proxy 502) | `server returned HTTP <status>` |
@@ -83,12 +95,14 @@ Files are checked locally before any request: extension, size (2 MB HTML, 512 KB
 
 Config lives in `$XDG_CONFIG_HOME/htmldoc` (default `~/.config/htmldoc`, mode 0700):
 
-- `config.json` (mode 0600): `{"apiKey": "..."}`, written only by `login`.
+- `config.json` (mode 0600): `{"apiKey": "..."}`, written only by `login --wait` and `login --paste`.
+- `pairing.json` (mode 0600): the sign-in request between `login` and `login --wait`: the device secret the CLI polls with, the code shown in the link, the expiry, the poll interval, and the API origin. It is deleted as soon as `--wait` finishes, one way or the other, and replaced by the next `login`. It never contains the key. Deleting it just cancels the pending sign-in.
 - `state.json`: maps absolute file paths to `{id, url}` so a repeat upload of the same path prints a hint naming the earlier URL and the `--update` form. It is a cache; deleting it is harmless.
 
 Environment variables:
 
 - `HTMLDOC_API_KEY` overrides the stored key (for agents and CI).
+- `HTMLDOC_NO_BROWSER=1` makes `login` print the approval link without opening a browser. Without it the CLI runs `open` on macOS, `xdg-open` on Linux (only when `DISPLAY` or `WAYLAND_DISPLAY` is set), or `cmd /c start` on Windows, and prints `Opening your browser…` first. A failed open is not an error; the link is always printed.
 - `HTMLDOC_API_URL` points the CLI at another origin, for example `http://localhost:8000` when running the service locally. `https://` is accepted anywhere; `http://` only for `localhost`, `127.0.0.1`, `::1`, and `*.localhost`. Anything else exits 1 before any request. While the override is active every command prints `using API at <origin>` to stderr, and the dashboard URL in hints is derived from it.
 
 ## Development
