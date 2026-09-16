@@ -28,6 +28,8 @@ const DEFAULT_INTERVAL_S = 5;
 const MAX_EXPIRES_IN_S = 15 * 60;
 const DEFAULT_EXPIRES_IN_S = 10 * 60;
 const BACKOFF_S = 5;
+/** Consecutive unreachable/5xx polls tolerated before `--wait` gives up (the pairing stays saved to resume). */
+const MAX_POLL_FAILURES = 5;
 
 export const USAGE = [
   'Usage:',
@@ -411,11 +413,31 @@ function scrub(text, secret) {
   return secret === '' ? text : String(text).split(secret).join('[redacted]');
 }
 
+/** A poll failure the wait rides out: the server is unreachable, timed out, or answered 5xx. */
+function isTransientPollError(error) {
+  if (!(error instanceof CliError)) return false;
+  return error.status === undefined ? error.message.startsWith('could not reach ') : error.status >= 500;
+}
+
 async function pollUntilDone(ctx, { deviceSecret, intervalSeconds: initialInterval, deadline }) {
   let intervalSeconds = initialInterval;
+  let failures = 0;
   const api = await client(ctx, undefined);
   for (;;) {
-    const result = await api.pollPair(deviceSecret);
+    let result;
+    try {
+      result = await api.pollPair(deviceSecret);
+      failures = 0;
+    } catch (error) {
+      // One dropped poll must not end a ten-minute wait; the pairing stays saved so a rerun resumes it.
+      failures += 1;
+      if (!isTransientPollError(error) || failures >= MAX_POLL_FAILURES) {
+        if (error instanceof CliError && error.hints.length === 0) error.hints = [`to resume this sign-in, run: npx ${PACKAGE_NAME} login --wait`];
+        throw error;
+      }
+      ctx.io.err(`${scrub(error.message, deviceSecret)}; retrying in ${intervalSeconds}s…`);
+      result = { status: 'retry' };
+    }
 
     if (result.status === 'ok') {
       await writeConfig(ctx.dir, { apiKey: result.apiKey });
@@ -438,8 +460,9 @@ async function pollUntilDone(ctx, { deviceSecret, intervalSeconds: initialInterv
     let delaySeconds = intervalSeconds;
     if (result.status === 'slow_down') {
       // Any 429 is a back-off, never a failure. A server-side slow_down raises the interval for good.
-      if (result.reason === 'slow_down') intervalSeconds = Math.min(MAX_INTERVAL_S, intervalSeconds + BACKOFF_S);
-      delaySeconds = result.retryAfterSeconds ?? (result.reason === 'slow_down' ? intervalSeconds : intervalSeconds + BACKOFF_S);
+      const serverSlowDown = result.reason === 'slow_down';
+      if (serverSlowDown) intervalSeconds = Math.min(MAX_INTERVAL_S, intervalSeconds + BACKOFF_S);
+      delaySeconds = result.retryAfterSeconds ?? (serverSlowDown ? intervalSeconds : intervalSeconds + BACKOFF_S);
     }
 
     const remainingMs = deadline - ctx.now();

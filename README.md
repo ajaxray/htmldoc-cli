@@ -87,6 +87,7 @@ Typical failure lines:
 | `login --paste` without a terminal | `login needs an interactive terminal to paste the key (stdin is not a TTY).` then where to get a key |
 | Page deleted or purged on `--update` (410) | the server's line |
 | Server down or unreachable | `could not reach <origin>: <reason>` (also used for the 60-second timeout) |
+| Server unreachable or 5xx during `login --wait` | the CLI prints `<reason>; retrying in Ns…` and keeps polling; after 5 failures in a row it exits 1 with that reason and `to resume this sign-in, run: npx htmldoc-cli login --wait`. The pending request is kept. |
 | Non-JSON error body (for example a proxy 502) | `server returned HTTP <status>` |
 
 Files are checked locally before any request: extension, size (2 MB HTML, 512 KB Markdown), non-empty, valid UTF-8 without a UTF-16 byte-order mark.
