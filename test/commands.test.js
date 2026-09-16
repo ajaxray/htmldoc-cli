@@ -669,6 +669,50 @@ describe('login --wait', () => {
     });
   }
 
+  it('rides out a 502, a network error, and a proxy timeout, announcing each retry, then stores the key', async () => {
+    const clock = await savePairing();
+    const html502 = () => new Response('<html>Bad Gateway</html>', { status: 502, headers: { 'Content-Type': 'text/html' } });
+    const offline = () => { throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }); };
+    const fetch = pollFetch([pending, html502, offline, pending, approved]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.stderr.includes('Logged in as @octo'), r.stderr);
+    const retries = r.stderr.split('\n').filter((line) => line.includes('retrying in 5s'));
+    assert.equal(retries.length, 2, r.stderr);
+    assert.match(retries[0], /^server returned HTTP 502; retrying/);
+    assert.match(retries[1], /^could not reach https:\/\/htmldoc\.space: .*; retrying/);
+    assert.ok(!r.stderr.includes(SECRET));
+    assert.equal(fetch.mock.calls.filter((c) => String(c.arguments[0]).endsWith('/pair/poll')).length, 5);
+    assert.deepEqual(clock.sleeps, [5000, 5000, 5000, 5000]);
+    await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+  });
+
+  it('gives up after five unreachable polls in a row, keeps pairing.json, and hints how to resume', async () => {
+    const clock = await savePairing();
+    const offline = () => { throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }); };
+    const fetch = pollFetch([offline]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, '');
+    const lines = r.stderr.trimEnd().split('\n');
+    assert.equal(lines.filter((line) => line.includes('retrying in')).length, 4, r.stderr);
+    assert.match(lines[lines.length - 2], /^could not reach https:\/\/htmldoc\.space: /);
+    assert.equal(lines[lines.length - 1], `to resume this sign-in, run: ${LOGIN_CMD} --wait`);
+    assert.equal(fetch.mock.callCount(), 5);
+    await stat(path.join(cfgDir, 'pairing.json'));
+    await assert.rejects(stat(path.join(cfgDir, 'config.json')));
+  });
+
+  it('a 4xx other than 410 or 429 while polling is fatal at once and keeps pairing.json', async () => {
+    const clock = await savePairing();
+    const fetch = pollFetch([() => jsonResponse(404, { error: 'unknown pairing' })]);
+    const r = await run(['login', '--wait'], { env: e(), now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr.trimEnd().split('\n')[1], 'unknown pairing');
+    assert.equal(fetch.mock.callCount(), 1);
+    await stat(path.join(cfgDir, 'pairing.json'));
+  });
+
   it('gives up at the saved expiry with "timed out" and the retry hint', async () => {
     const clock = fakeClock();
     await savePairing({ expiresAt: new Date(clock.now() + 12_000).toISOString() }, clock);
