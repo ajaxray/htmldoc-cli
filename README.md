@@ -14,11 +14,19 @@ The link is unlisted, lives 30 days, and can be updated in place so the URL neve
 ## Setup, once
 
 ```sh
-npx -y htmldoc-cli login          # prints an approval link and opens it in your browser
-npx -y htmldoc-cli login --wait   # after you click Approve: stores the key, says who you are
+npx -y htmldoc-cli login   # opens an approval page, waits for your click, stores the key
 ```
 
-`login` needs no interactive terminal, so an agent can run it for you. It prints `Open this link to approve: https://htmldoc.space/connect/<code>` and the code, then exits at once. Sign in there with GitHub (an account is created if you have none), check that the code matches, and click Approve. `login --wait` polls until the approval lands, times out, or is denied. Pass `--no-browser` (or set `HTMLDOC_NO_BROWSER=1`) to only print the link, for example on a headless machine; open it on any device.
+`login` prints `Open this link to approve: https://htmldoc.space/connect/<code>` and the code, and opens the link in your browser. Sign in there with GitHub (an account is created if you have none), check that the code matches, and click Approve. In a terminal the same command waits for that click, stores the key, and says who you are.
+
+Agents have no terminal, so for them `login` exits at once after printing the link, and a second command finishes the job. The [agent skill](https://github.com/ajaxray/htmldoc-skill) runs both for you:
+
+```sh
+npx -y htmldoc-cli login --no-wait   # print the link and exit (automatic when stdin is not a terminal)
+npx -y htmldoc-cli login --wait      # after the click: store the key, say who you are
+```
+
+`login --wait` polls until the approval lands, times out, or is denied. Pass `--no-browser` (or set `HTMLDOC_NO_BROWSER=1`) to only print the link, for example on a headless machine; open it on any device.
 
 Prefer to copy the key yourself? Sign in at [htmldoc.space/dashboard](https://htmldoc.space/dashboard), copy the key, and run `npx -y htmldoc-cli login --paste`.
 
@@ -52,8 +60,8 @@ Agents write better HTML than Markdown, and the Claude Code team [says so with t
 | Command | What it does |
 |---|---|
 | `htmldoc <file> [--update <id\|url>] [--json]` | Upload an `.html`, `.htm`, `.md`, or `.markdown` file. With `--update` the existing page keeps its URL and gets a fresh 30 days. |
-| `htmldoc login [--no-browser]` | Start signing in: prints an approval link and code, opens the link in your browser (unless `--no-browser` or `HTMLDOC_NO_BROWSER=1`), and exits 0 at once. Running it again replaces the pending request. |
-| `htmldoc login --wait [--timeout <seconds>]` | Wait for that approval, then store the key and print `Logged in as @you` and the dashboard URL. Gives up at the request's expiry (10 minutes) or `--timeout`, whichever is sooner. |
+| `htmldoc login [--no-browser] [--no-wait]` | Sign in: prints an approval link and code and opens the link in your browser (unless `--no-browser` or `HTMLDOC_NO_BROWSER=1`). In a terminal it then waits for your click like `login --wait`. Without a terminal, or with `--no-wait`, it exits 0 at once so an agent can relay the link. Running it again replaces the pending request. |
+| `htmldoc login --wait [--timeout <seconds>]` | Wait for a pending approval (what agents run after `login`), then store the key and print `Logged in as @you` and the dashboard URL. Gives up at the request's expiry (10 minutes) or `--timeout`, whichever is sooner. |
 | `htmldoc login --paste` | Paste your API key (hidden input) and store it. Needs an interactive terminal. |
 | `htmldoc list [--json]` | List your live pages. |
 | `htmldoc delete <id\|url>` | Delete a page. No confirmation prompt. |
@@ -75,7 +83,7 @@ Typical failure lines:
 
 | Situation | stderr |
 |---|---|
-| No key configured | `no API key configured.` then `Get your key at https://htmldoc.space/dashboard` and `then run: npx htmldoc-cli login` |
+| No key configured | `no API key configured.` then `sign in with: npx htmldoc-cli login` and `or copy your key from https://htmldoc.space/dashboard and run: npx htmldoc-cli login --paste` |
 | Rejected key (401) | the server's line, then the same two hint lines |
 | Unsupported extension | `unsupported file type ".txt": use .html, .htm, .md, or .markdown` |
 | Over the size cap, locally or from the server | `file is too large: HTML files up to 2 MB, Markdown files up to 512 KB` |
@@ -84,7 +92,7 @@ Typical failure lines:
 | `login --wait` with nothing pending | `no sign-in is waiting for approval.` then `run: npx htmldoc-cli login` |
 | Approval denied, expired, or already consumed | one line naming the outcome (a consumed approval says the reply may have been lost), then the same `run: npx htmldoc-cli login` hint. The pending request is forgotten. |
 | `login --wait` ran out of time | `timed out waiting for approval.` then the same hint |
-| `login --paste` without a terminal | `login needs an interactive terminal to paste the key (stdin is not a TTY).` then where to get a key |
+| `login --paste` without a terminal | `login needs an interactive terminal to paste the key (stdin is not a TTY).` then `run: npx htmldoc-cli login instead; it needs no terminal` |
 | Page deleted or purged on `--update` (410) | the server's line |
 | Server down or unreachable | `could not reach <origin>: <reason>` (also used for the 60-second timeout) |
 | Server unreachable or 5xx during `login --wait` | the CLI prints `<reason>; retrying in Ns…` and keeps polling; after 5 failures in a row it exits 1 with that reason and `to resume this sign-in, run: npx htmldoc-cli login --wait`. The pending request is kept. |

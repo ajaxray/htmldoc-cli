@@ -34,8 +34,8 @@ const MAX_POLL_FAILURES = 5;
 export const USAGE = [
   'Usage:',
   '  htmldoc <file> [--update <id|url>] [--json]   share an .html, .htm, .md, or .markdown file',
-  '  htmldoc login [--no-browser]                  start signing in: prints an approval link and opens it',
-  '  htmldoc login --wait [--timeout <seconds>]    wait for that approval, then store the key',
+  '  htmldoc login [--no-browser] [--no-wait]      sign in: prints an approval link, opens it, and on a terminal waits for your click',
+  '  htmldoc login --wait [--timeout <seconds>]    wait for a pending approval, then store the key (agents run this after login)',
   '  htmldoc login --paste                         paste and store your API key (interactive terminal)',
   '  htmldoc list [--json]                         list your live pages',
   '  htmldoc delete <id|url>                       delete a page',
@@ -293,14 +293,16 @@ async function login(ctx, args) {
     wait: { type: 'boolean', default: false },
     timeout: { type: 'string' },
     'no-browser': { type: 'boolean', default: false },
+    'no-wait': { type: 'boolean', default: false },
   });
   if (positionals.length !== 0) throw new CliError('login takes no arguments; the key is never passed on the command line', { hints: USAGE.split('\n') });
   if (values.paste && values.wait) throw new CliError('login takes --paste or --wait, not both', { hints: USAGE.split('\n') });
+  if (values['no-wait'] && (values.wait || values.paste)) throw new CliError('--no-wait only applies to a plain login', { hints: USAGE.split('\n') });
   if (values.timeout !== undefined && !values.wait) throw new CliError('--timeout only applies to login --wait', { hints: USAGE.split('\n') });
 
   if (values.paste) return loginPaste(ctx);
   if (values.wait) return loginWait(ctx, values.timeout);
-  return loginStart(ctx, { noBrowser: values['no-browser'] });
+  return loginStart(ctx, { noBrowser: values['no-browser'], noWait: values['no-wait'] });
 }
 
 function clampNumber(value, { min, max, fallback }) {
@@ -311,9 +313,11 @@ function clampNumber(value, { min, max, fallback }) {
 
 /**
  * Phase one (KTD5): create the pairing, print the link and code, try the
- * browser, save pairing.json, exit 0. Never blocks on approval.
+ * browser, save pairing.json. Without a terminal (an agent's shell) or with
+ * --no-wait it exits 0 at once so the link can be relayed; a person at a
+ * terminal gets the wait in the same command.
  */
-async function loginStart(ctx, { noBrowser }) {
+async function loginStart(ctx, { noBrowser, noWait }) {
   const api = await client(ctx, undefined);
   const pairing = await api.pair();
 
@@ -347,6 +351,7 @@ async function loginStart(ctx, { noBrowser }) {
     }
     if (!opened) ctx.io.err('Could not open a browser; open the link above yourself.');
   }
+  if (ctx.stdin.isTTY && !noWait) return loginWait(ctx, undefined);
   ctx.io.err(`After approving, run: npx ${PACKAGE_NAME} login --wait`);
   return 0;
 }
@@ -479,7 +484,7 @@ async function loginPaste(ctx) {
   const dashboard = dashboardUrl(ctx.origin);
   if (!ctx.stdin.isTTY) {
     throw new CliError('login needs an interactive terminal to paste the key (stdin is not a TTY).', {
-      hints: keyInstructions(dashboard),
+      hints: [`${loginHint()} instead; it needs no terminal`, `your key is at ${dashboard}`],
     });
   }
 

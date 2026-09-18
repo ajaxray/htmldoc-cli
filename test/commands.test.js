@@ -568,6 +568,41 @@ describe('login (handoff start)', () => {
     await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
   });
 
+  it('on a terminal: the same command waits for the approval, stores the key, and greets', async () => {
+    const clock = fakeClock();
+    let polls = 0;
+    const fetch = mockFetch((url) => {
+      if (url.endsWith('/api/v1/pair')) return jsonResponse(201, PAIRING);
+      if (url.endsWith('/api/v1/pair/poll')) return (polls += 1) < 2 ? jsonResponse(202, { status: 'pending' }) : jsonResponse(200, { api_key: KEY, github_login: 'octo' });
+      if (url.endsWith('/api/v1/me')) return jsonResponse(200, { github_login: 'octo' });
+      return jsonResponse(500, { error: 'unexpected request' });
+    });
+    const r = await run(['login'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true }, now: clock.now, sleep: clock.sleep });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, '');
+    const lines = r.stderr.trimEnd().split('\n');
+    assert.ok(lines.indexOf(`Open this link to approve: ${LINK}`) < lines.findIndex((l) => l.startsWith('Waiting for approval')), r.stderr);
+    assert.ok(!r.stderr.includes('After approving, run:'), r.stderr);
+    assert.ok(r.stderr.includes('Logged in as @octo'), r.stderr);
+    assertNoKey(r);
+    assert.ok(!r.stderr.includes(SECRET));
+    assert.equal(fetch.mock.callCount(), 4);
+    assert.deepEqual(JSON.parse(await readFile(path.join(cfgDir, 'config.json'), 'utf8')), { apiKey: KEY });
+    await assert.rejects(stat(path.join(cfgDir, 'pairing.json')));
+  });
+
+  it('on a terminal with --no-wait: exits at once like an agent shell, and --no-wait refuses --wait and --paste', async () => {
+    const fetch = pairFetch();
+    const r = await run(['login', '--no-wait'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.stderr.includes(`After approving, run: ${LOGIN_CMD} --wait`), r.stderr);
+    assert.equal(fetch.mock.callCount(), 1);
+    await stat(path.join(cfgDir, 'pairing.json'));
+    assert.equal((await run(['login', '--no-wait', '--wait'], { env: { XDG_CONFIG_HOME: xdg } })).code, 1);
+    assert.equal((await run(['login', '--no-wait', '--paste'], { env: { XDG_CONFIG_HOME: xdg }, stdin: { isTTY: true } })).code, 1);
+    assert.equal(fetch.mock.callCount(), 1);
+  });
+
   it('rejects positionals and --timeout without --wait', async () => {
     const fetch = pairFetch();
     assert.equal((await run(['login', 'extra'], { env: { XDG_CONFIG_HOME: xdg } })).code, 1);

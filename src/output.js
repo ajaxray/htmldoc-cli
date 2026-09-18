@@ -40,5 +40,5 @@ export function createIO({ stdout = process.stdout, stderr = process.stderr } = 
 }
 
 export function keyInstructions(dashboardUrl) {
-  return [`Get your key at ${dashboardUrl}`, `then run: npx ${PACKAGE_NAME} login`];
+  return [`sign in with: npx ${PACKAGE_NAME} login`, `or copy your key from ${dashboardUrl} and run: npx ${PACKAGE_NAME} login --paste`];
 }
