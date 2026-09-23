@@ -52,7 +52,7 @@ Agents write better HTML than Markdown, and the Claude Code team [says so with t
 
 - One file per link. HTML is served byte for byte; Markdown is rendered.
 - Caps: 2 MB HTML, 512 KB Markdown, 100 live pages per account.
-- 30-day expiry, reset by every `--update`. Re-sharing the same file keeps the same link.
+- 30-day expiry, reset by every `--update`. Re-sharing the same file keeps the same link. A page pinned from the dashboard does not expire; `--update` keeps the pin.
 - A small badge with a Report link on every page. That is the only thing added to your HTML.
 
 ## Commands
@@ -63,7 +63,7 @@ Agents write better HTML than Markdown, and the Claude Code team [says so with t
 | `htmldoc login [--no-browser] [--no-wait]` | Sign in: prints an approval link and code and opens the link in your browser (unless `--no-browser` or `HTMLDOC_NO_BROWSER=1`). In a terminal it then waits for your click like `login --wait`. Without a terminal, or with `--no-wait`, it exits 0 at once so an agent can relay the link. Running it again replaces the pending request. |
 | `htmldoc login --wait [--timeout <seconds>]` | Wait for a pending approval (what agents run after `login`), then store the key and print `Logged in as @you` and the dashboard URL. Gives up at the request's expiry (10 minutes) or `--timeout`, whichever is sooner. |
 | `htmldoc login --paste` | Paste your API key (hidden input) and store it. Needs an interactive terminal. |
-| `htmldoc list [--json]` | List your live pages. |
+| `htmldoc list [--json]` | List your live pages. A pinned page shows `pinned` in the EXPIRES column. Pinning itself happens on the dashboard. |
 | `htmldoc delete <id\|url>` | Delete a page. No confirmation prompt. |
 | `htmldoc --version`, `htmldoc --help` | Version and usage. |
 
@@ -73,8 +73,8 @@ Agents write better HTML than Markdown, and the Claude Code team [says so with t
 
 Scripts and agents can rely on this:
 
-- On success the upload prints **only the share URL** on stdout, followed by a newline. The id and expiry go to stderr. With `--json`, stdout is one line: `{"id":"...","url":"...","expires_at":"..."}`.
-- `list` prints a table on stdout (`ID  STATE  EXPIRES  FILENAME  URL`), or the raw `{"pages":[...]}` payload with `--json`. With no pages, stdout is empty and stderr says `no pages`.
+- On success the upload prints **only the share URL** on stdout, followed by a newline. The id and expiry go to stderr (`expires: never (pinned)` for a pinned page). With `--json`, stdout is one line: `{"id":"...","url":"...","expires_at":"..."}`, where `expires_at` is `null` for a pinned page.
+- `list` prints a table on stdout (`ID  STATE  EXPIRES  FILENAME  URL`, with `pinned` in EXPIRES for a pinned page), or the raw `{"pages":[...]}` payload with `--json`, where each page carries `state` and `pinned`. With no pages, stdout is empty and stderr says `no pages`.
 - `delete` prints nothing on stdout and `deleted <url>` on stderr.
 - Every failure exits 1 with a one-line reason on stderr and nothing on stdout. Some failures add hint lines after the reason (for example where to get a key).
 - stderr never contains an API key.
