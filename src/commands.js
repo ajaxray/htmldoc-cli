@@ -227,9 +227,13 @@ async function upload(ctx, args) {
   return 0;
 }
 
-/** A pinned page has no expiry: the server sends `expires_at: null` (pin plan, R11). */
+/** A pinned page has no expiry: the server sends `pinned: true` on list items and `expires_at: null` everywhere (pin plan, R11). */
+function isPinned(page) {
+  return page.pinned === true || page.expires_at === null;
+}
+
 function expiryLabel(page) {
-  return page.pinned === true || page.expires_at === null ? 'never (pinned)' : page.expires_at;
+  return isPinned(page) ? 'never (pinned)' : page.expires_at;
 }
 
 async function list(ctx, args) {
@@ -261,7 +265,7 @@ function table(pages) {
   const columns = [
     ['ID', (p) => p.id],
     ['STATE', (p) => p.state],
-    ['EXPIRES', (p) => (p.pinned === true ? 'pinned' : p.expires_at)],
+    ['EXPIRES', (p) => (isPinned(p) ? 'pinned' : p.expires_at)],
     ['FILENAME', (p) => p.filename],
     ['URL', (p) => p.url],
   ];
