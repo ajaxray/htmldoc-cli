@@ -6,6 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
 import { main, readSecretFromTty } from '../src/commands.js';
+import { VERSION } from '../src/api.js';
 import { openUrl, openerFor } from '../src/browser.js';
 import { run, runBin, tempDir, jsonResponse, capture, fakeClock, PAGE, PAIRING, CODE, SECRET } from './helpers.js';
 import { writeConfig, writePairing } from '../src/config.js';
@@ -1041,7 +1042,7 @@ describe('bin/htmldoc.js end to end', () => {
   it('--version prints the package version', async () => {
     const r = await runBin(['--version'], { cwd: work });
     assert.equal(r.code, 0);
-    assert.equal(r.stdout.trim(), '0.2.0');
+    assert.equal(r.stdout.trim(), VERSION);
   });
 
   it('bin is executable and starts with a node shebang', async () => {
