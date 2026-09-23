@@ -85,6 +85,15 @@ describe('upload', () => {
     assertNoKey(r);
   });
 
+  it('says the page never expires when the update response has no expiry (pinned page)', async () => {
+    mockFetch(() => jsonResponse(200, { ...PAGE, expires_at: null }));
+    const r = await run(['plan.md', '--update', PAGE.id], { env, cwd: work });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, PAGE.url + '\n');
+    assert.ok(r.stderr.includes('expires: never (pinned)'), r.stderr);
+    assert.ok(!r.stderr.includes('null'), r.stderr);
+  });
+
   it('prints {id, url, expires_at} only with --json', async () => {
     mockFetch(() => jsonResponse(201, PAGE));
     const r = await run(['plan.md', '--json'], { env, cwd: work });
@@ -876,8 +885,9 @@ describe('browser opener', () => {
 
 describe('list and delete', () => {
   const pages = [
-    { ...PAGE, state: 'active' },
-    { id: 'zzz987654321', url: 'https://p.htmldoc.space/zzz987654321', expires_at: '2026-09-01T00:00:00Z', filename: 'old.html', kind: 'html', state: 'expired' },
+    { ...PAGE, state: 'active', pinned: false },
+    { id: 'zzz987654321', url: 'https://p.htmldoc.space/zzz987654321', expires_at: '2026-09-01T00:00:00Z', filename: 'old.html', kind: 'html', state: 'expired', pinned: false },
+    { id: 'pin123456789', url: 'https://p.htmldoc.space/pin123456789', expires_at: null, filename: 'kept.html', kind: 'html', state: 'active', pinned: true },
   ];
 
   it('list prints one row per page on stdout', async () => {
@@ -885,11 +895,22 @@ describe('list and delete', () => {
     const r = await run(['list'], { env });
     assert.equal(r.code, 0, r.stderr);
     const lines = r.stdout.trimEnd().split('\n');
-    assert.equal(lines.length, 3, r.stdout);
+    assert.equal(lines.length, 4, r.stdout);
     assert.match(lines[0], /ID/);
     assert.ok(lines[1].includes(PAGE.id) && lines[1].includes(PAGE.url) && lines[1].includes('plan.md') && lines[1].includes('active'));
+    assert.ok(lines[1].includes(PAGE.expires_at));
     assert.ok(lines[2].includes('zzz987654321') && lines[2].includes('expired'));
+    assert.ok(lines[3].includes('pin123456789') && lines[3].includes('pinned') && lines[3].includes('kept.html'), lines[3]);
+    assert.ok(!lines[3].includes('null'), lines[3]);
     assertNoKey(r);
+  });
+
+  it('list still prints the date for a page without a pinned field (older server)', async () => {
+    mockFetch(() => jsonResponse(200, { pages: [{ ...PAGE, state: 'active' }] }));
+    const r = await run(['list'], { env });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.stdout.includes(PAGE.expires_at));
+    assert.ok(!r.stdout.includes('pinned'));
   });
 
   it('list --json prints the server payload', async () => {
